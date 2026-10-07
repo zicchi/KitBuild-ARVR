@@ -64,6 +64,12 @@ public class ConceptMapManager : MonoBehaviour
     private const float MIN_SCALE = 0.3f;
     private const float MAX_SCALE = 3.0f;
 
+    private const float XR_MAP_DIST     = 1.4f;
+    private const float XR_MAP_WIDTH    = 1.4f;
+    private const float XR_MAP_HEIGHT   = 0.8f;
+    private const float XR_PLACE_DIST   = 1.2f;
+    private const float XR_PICK_DEGREES = 6f;
+
     // ─── Undo / Redo ──────────────────────────────
     private class UndoRecord
     {
@@ -180,6 +186,13 @@ public class ConceptMapManager : MonoBehaviour
     // ── Pinch to scale semua node ─────────────────
     void HandlePinchZoom()
     {
+        float axis = PointerInput.ScaleAxis;
+        if (Mathf.Abs(axis) > 0.2f)
+        {
+            nodeScale = Mathf.Clamp(nodeScale + axis * Time.deltaTime, MIN_SCALE, MAX_SCALE);
+            ApplyScaleToAll();
+        }
+
         if (Input.touchCount != 2) { lastPinchDist = -1f; return; }
 
         Touch t0 = Input.GetTouch(0);
@@ -214,6 +227,27 @@ public class ConceptMapManager : MonoBehaviour
     //  JSON LOAD
     // ─────────────────────────────────────────────
     public void ApplyMapJson(string json)
+    {
+        if (PointerInput.IsXR && !XRSupport.Instance.HeadTracked)
+        {
+            StartCoroutine(ApplyMapJsonWhenTracked(json));
+            return;
+        }
+        ApplyMapJsonNow(json);
+    }
+
+    IEnumerator ApplyMapJsonWhenTracked(string json)
+    {
+        float waited = 0f;
+        while (!XRSupport.Instance.HeadTracked && waited < 3f)
+        {
+            waited += Time.unscaledDeltaTime;
+            yield return null;
+        }
+        ApplyMapJsonNow(json);
+    }
+
+    void ApplyMapJsonNow(string json)
     {
         try
         {
@@ -251,25 +285,32 @@ public class ConceptMapManager : MonoBehaviour
 
         // Fit ke FOV kamera: seluruh peta langsung terlihat tanpa pinch-zoom.
         // Dihitung dari sudut pandang kamera → otomatis benar di portrait & landscape.
-        const float DIST = 1.0f;                       // jarak peta dari kamera
+        float DIST = 1.0f;                             // jarak peta dari kamera
         float vFov   = arCamera.fieldOfView * Mathf.Deg2Rad;
         float worldH = 2f * DIST * Mathf.Tan(vFov * 0.5f) * 0.65f;   // 65% tinggi layar
         float worldW = worldH * arCamera.aspect * 0.9f;               // 90% lebar layar
+        if (PointerInput.IsXR)
+        {
+            DIST   = XR_MAP_DIST;
+            worldH = XR_MAP_HEIGHT;
+            worldW = XR_MAP_WIDTH;
+        }
 
         float scaleX = worldW / rangeX, scaleY = worldH / rangeY;
         float scale  = Mathf.Min(scaleX, scaleY);
 
-        Vector3 origin = arCamera.transform.position
-                       + arCamera.transform.forward * DIST
-                       - arCamera.transform.right   * worldW * 0.5f
-                       - arCamera.transform.up      * worldH * 0.5f;
+        GetViewBasis(out Vector3 camPos, out Vector3 fwd, out Vector3 right, out Vector3 up);
+        Vector3 origin = camPos
+                       + fwd   * DIST
+                       - right * worldW * 0.5f
+                       - up    * worldH * 0.5f;
 
         Vector3 WorldPos(float x, float y)
         {
             float nx = (x - minX) * scale;
             float ny = (y - minY) * scale;
             // Flip Y (screen Y down, Unity Y up)
-            return origin + arCamera.transform.right * nx + arCamera.transform.up * (worldH - ny);
+            return origin + right * nx + up * (worldH - ny);
         }
 
         // Spawn concepts
@@ -374,28 +415,32 @@ public class ConceptMapManager : MonoBehaviour
     void HandlePlacementTap()
     {
         if (currentMode == Mode.None) return;
-        if (Input.touchCount == 0) return;
 
-        Touch t = Input.GetTouch(0);
-        if (t.phase != TouchPhase.Ended) return;
-
-        // Don't place if touch is on UI
-        if (UnityEngine.EventSystems.EventSystem.current.IsPointerOverGameObject(t.fingerId)) return;
-
-        Vector3 worldPos;
-
-        // Try AR raycast against detected planes
-        if (arRaycast.Raycast(t.position, arHits, TrackableType.PlaneWithinPolygon))
+        foreach (var p in PointerInput.Samples)
         {
-            worldPos = arHits[0].pose.position;
-        }
-        else
-        {
-            // Fallback: 1.5m in front of camera
-            worldPos = arCamera.transform.position + arCamera.transform.forward * 1.5f;
-        }
+            if (p.phase != TouchPhase.Ended) continue;
 
-        PlaceNodeAt(worldPos);
+            // Don't place if touch is on UI
+            if (p.overUI) continue;
+
+            Vector3 worldPos;
+
+            // Try AR raycast against detected planes
+            if (arRaycast.Raycast(p.ray, arHits, TrackableType.PlaneWithinPolygon))
+            {
+                worldPos = arHits[0].pose.position;
+            }
+            else
+            {
+                // Fallback: 1.5m in front of camera
+                worldPos = p.xr
+                    ? p.ray.GetPoint(XR_PLACE_DIST)
+                    : arCamera.transform.position + arCamera.transform.forward * 1.5f;
+            }
+
+            PlaceNodeAt(worldPos);
+            return;
+        }
     }
 
     void PlaceNodeAt(Vector3 worldPos)
@@ -435,7 +480,7 @@ public class ConceptMapManager : MonoBehaviour
     // ─────────────────────────────────────────────
     //  DRAG-TO-CONNECT  (called by MapNode)
     // ─────────────────────────────────────────────
-    public void BeginConnectionDrag(MapNode fromNode, Vector3 screenPos)
+    public void BeginConnectionDrag(MapNode fromNode, PointerSample pointer)
     {
         isDragging   = true;
         dragFromNode = fromNode;
@@ -452,7 +497,7 @@ public class ConceptMapManager : MonoBehaviour
             : "Drag ke node Konsep untuk set target");
     }
 
-    public void UpdateConnectionDrag(Vector3 screenPos)
+    public void UpdateConnectionDrag(PointerSample pointer)
     {
         if (!isDragging || previewLR == null) return;
 
@@ -461,7 +506,7 @@ public class ConceptMapManager : MonoBehaviour
         // Proyeksikan jari ke bidang sejajar kamera di kedalaman node,
         // supaya ujung garis selalu tepat di bawah jari
         Plane p = new Plane(arCamera.transform.forward, from);
-        Ray   r = arCamera.ScreenPointToRay(screenPos);
+        Ray   r = pointer.ray;
         Vector3 to = p.Raycast(r, out float d)
             ? r.GetPoint(d)
             : r.origin + r.direction * 1.5f;
@@ -470,7 +515,7 @@ public class ConceptMapManager : MonoBehaviour
         previewLR.SetPosition(1, to);
     }
 
-    public void EndConnectionDrag(Vector3 screenPos, MapNode fromNode, bool backward = false)
+    public void EndConnectionDrag(PointerSample pointer, MapNode fromNode, bool backward = false)
     {
         if (!isDragging) return;
         isDragging = false;
@@ -480,7 +525,7 @@ public class ConceptMapManager : MonoBehaviour
 
         // 1) Raycast langsung ke node
         MapNode target = null;
-        Ray ray = arCamera.ScreenPointToRay(screenPos);
+        Ray ray = pointer.ray;
         if (Physics.Raycast(ray, out RaycastHit hit, 10f))
         {
             var hitNode = hit.transform.GetComponentInParent<MapNode>();
@@ -489,7 +534,17 @@ public class ConceptMapManager : MonoBehaviour
 
         // 2) Sensing lebar: kalau raycast meleset, ambil node terdekat
         //    dalam radius layar (10% tinggi layar) dari titik lepas
-        if (target == null)
+        if (target == null && pointer.xr)
+        {
+            float best = XR_PICK_DEGREES;
+            foreach (var n in MapNode.All)
+            {
+                if (n == null || n == fromNode) continue;
+                float a = Vector3.Angle(ray.direction, n.transform.position - ray.origin);
+                if (a < best) { best = a; target = n; }
+            }
+        }
+        else if (target == null)
         {
             float best = Screen.height * 0.10f;
             foreach (var n in MapNode.All)
@@ -497,7 +552,7 @@ public class ConceptMapManager : MonoBehaviour
                 if (n == null || n == fromNode) continue;
                 Vector3 sp = arCamera.WorldToScreenPoint(n.transform.position);
                 if (sp.z < 0f) continue;
-                float d = Vector2.Distance((Vector2)sp, (Vector2)screenPos);
+                float d = Vector2.Distance((Vector2)sp, pointer.screenPos);
                 if (d < best) { best = d; target = n; }
             }
         }
@@ -578,10 +633,7 @@ public class ConceptMapManager : MonoBehaviour
         foreach (var n in MapNode.All) if (n != null) nodes.Add(n);
         if (nodes.Count == 0) return;
 
-        Vector3 camPos  = arCamera.transform.position;
-        Vector3 fwd     = arCamera.transform.forward;
-        Vector3 right   = arCamera.transform.right;
-        Vector3 up      = arCamera.transform.up;
+        GetViewBasis(out Vector3 camPos, out Vector3 fwd, out Vector3 right, out Vector3 up);
 
         // Bidang layout = jarak rata-rata node dari kamera (bukan reset ke 0.7m)
         float dist = 0f;
@@ -637,22 +689,39 @@ public class ConceptMapManager : MonoBehaviour
         foreach (var n in nodes) centroid += n.transform.position;
         centroid /= nodes.Count;
 
-        var cam = arCamera.transform;
+        GetViewBasis(out Vector3 camPos, out Vector3 fwd, out Vector3 right, out Vector3 up);
 
         // Simpan offset tiap node pada basis kamera (kedalaman diratakan)
         var offsets = new List<(MapNode n, float x, float y)>();
         foreach (var n in nodes)
         {
             Vector3 rel = n.transform.position - centroid;
-            offsets.Add((n, Vector3.Dot(rel, cam.right), Vector3.Dot(rel, cam.up)));
+            offsets.Add((n, Vector3.Dot(rel, right), Vector3.Dot(rel, up)));
         }
 
-        // Tempatkan pusat grup 1m di depan kamera
-        Vector3 newCenter = cam.position + cam.forward * 1.0f;
+        // Tempatkan pusat grup di depan kamera
+        Vector3 newCenter = camPos + fwd * (PointerInput.IsXR ? XR_MAP_DIST : 1.0f);
         foreach (var (n, x, y) in offsets)
-            n.transform.position = newCenter + cam.right * x + cam.up * y;
+            n.transform.position = newCenter + right * x + up * y;
 
         ShowStatus("[OK] Peta dipusatkan ke depan kamera");
+    }
+
+    void GetViewBasis(out Vector3 pos, out Vector3 fwd, out Vector3 right, out Vector3 up)
+    {
+        var cam = arCamera.transform;
+        pos = cam.position;
+        if (!PointerInput.IsXR)
+        {
+            fwd = cam.forward; right = cam.right; up = cam.up;
+            return;
+        }
+
+        fwd = Vector3.ProjectOnPlane(cam.forward, Vector3.up);
+        if (fwd.sqrMagnitude < 1e-4f) fwd = Vector3.ProjectOnPlane(cam.up, Vector3.up);
+        fwd.Normalize();
+        up    = Vector3.up;
+        right = Vector3.Cross(up, fwd);
     }
 
     // Cari sel grid kosong terdekat (spiral keluar dari sel asal)

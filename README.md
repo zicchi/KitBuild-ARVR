@@ -18,7 +18,7 @@ bisa disambungkan menjadi proposisi `Konsep --[relasi]--> Konsep`.
 ## Kebutuhan
 
 - Unity **6000.4.6f1**
-- Android (ARCore, min API 29) atau iOS (ARKit)
+- Android (ARCore, min API 29), iOS (ARKit), atau Meta Quest 3/3S (OpenXR)
 
 ## Menjalankan
 
@@ -33,6 +33,64 @@ Unity -batchmode -quit -projectPath . -buildTarget Android -executeMethod BuildA
 ```
 
 Hasilnya ada di `Builds/ConceptMapAR.apk`.
+
+## Meta Quest 3S (passthrough AR)
+
+Versi Quest memakai OpenXR + **Unity OpenXR: Meta** (`com.unity.xr.meta-openxr`)
+untuk passthrough, plane detection, dan raycast. Kode yang sama dipakai HP & Quest;
+`XRSupport` aktif otomatis saat headset terdeteksi.
+
+### Siapkan headset (sekali saja)
+
+1. Install app **Meta Horizon** di HP, login, pair Quest 3S.
+2. Buat organisasi developer di <https://developers.meta.com/horizon/> (gratis).
+3. Di app Meta Horizon: **Devices → Headset settings → Developer mode → ON**, lalu restart Quest.
+4. Colok Quest ke Mac pakai kabel USB-C (data). Di headset muncul dialog
+   **Allow USB debugging** → centang *Always allow* → **Allow**.
+5. Cek koneksi:
+
+   ```bash
+   ~/Library/Android/sdk/platform-tools/adb devices
+   ```
+
+   (atau `adb` bawaan Unity: `.../Unity.app/Contents/PlaybackEngines/AndroidPlayer/SDK/platform-tools/adb`).
+   Status harus `device`, bukan `unauthorized`.
+
+### Build & jalankan
+
+1. Menu **ConceptMapAR → Target: Meta Quest 3S (OpenXR)** — mengganti loader ARCore ke OpenXR,
+   menyalakan fitur Meta (Session, Camera/Passthrough, Planes, Raycast), profil controller
+   Touch Plus & hand tracking, Vulkan, ARM64, min API 32.
+2. Buka **Project Settings → XR Plug-in Management → Project Validation**, klik **Fix All** bila ada.
+3. **File → Build Profiles → Android → Run Device** pilih Quest → **Build And Run**,
+   atau menu **ConceptMapAR → Build Quest APK** lalu:
+
+   ```bash
+   adb install -r Builds/ConceptMapAR-Quest.apk
+   ```
+
+   App muncul di headset: **Library → Unknown Sources**.
+4. Kembali ke HP: **ConceptMapAR → Target: Android Phone (ARCore)**.
+
+Build Quest dari command line:
+
+```bash
+Unity -batchmode -quit -projectPath . -buildTarget Android -executeMethod QuestSetup.BuildQuest
+```
+
+### Kontrol di Quest
+
+| Aksi                         | Controller                     | Tangan              |
+|------------------------------|--------------------------------|---------------------|
+| Pilih node / tekan tombol UI | Trigger                        | Pinch               |
+| Pindah node                  | Tahan trigger di node + arahkan | Tahan pinch + arahkan |
+| Sambungkan                   | Tahan trigger di → / ←, lepas di node tujuan | sama, pakai pinch |
+| Ubah ukuran semua node       | Thumbstick kanan atas/bawah    | –                   |
+| Pindahkan panel menu ke depan | Tombol ≡ (kiri) / B (kanan)   | –                   |
+
+Panel toolbar mengikuti kepala secara lembut; indikator tepi layar dimatikan di Quest.
+Izin *spatial data* (`USE_SCENE`) diminta saat pertama dibuka — izinkan agar node bisa
+ditaruh di permukaan meja/lantai.
 
 ## Sumber data
 
@@ -77,3 +135,6 @@ otomatis agar pas di depan kamera.
 | `ApiLoader.cs`               | Memuat peta awal dari API / `map.json`                   |
 | `ConceptMapData.cs`          | Model data JSON                                          |
 | `CameraPermissionHandler.cs` | Meminta izin kamera sebelum ARSession aktif              |
+| `PointerInput.cs`            | Input terpadu: sentuh / mouse / ray controller XR        |
+| `XRSupport.cs`               | Rig Quest: passthrough, ray controller & tangan, UI world-space |
+| `Editor/QuestSetup.cs`       | Menu switch target Quest ⇄ HP dan build APK Quest        |

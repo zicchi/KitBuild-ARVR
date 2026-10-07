@@ -47,12 +47,11 @@ public abstract class MapNode : MonoBehaviour
     private MaterialPropertyBlock fwdBtnBlock, bwdBtnBlock;
 
     // Gesture
-    private bool    isTracking;
-    private int     trackedFingerId = -1;
-    private Vector3 touchBeganScreenPos;
-    private Vector3 dragOffset;
-    private bool    hasDragged;
-    private const float DRAG_THRESHOLD = 15f;
+    private bool          isTracking;
+    private int           trackedPointerId = -1;
+    private PointerSample beganSample;
+    private Vector3       dragOffset;
+    private bool          hasDragged;
 
     // Mode koneksi
     private enum ConnectMode { None, Forward, Backward }
@@ -97,9 +96,10 @@ public abstract class MapNode : MonoBehaviour
         if (arCamera == null) return;
         // Up = sumbu dunia (bukan kamera) → node tetap tegak/steady
         // walau HP diputar portrait ⇄ landscape
-        transform.LookAt(
-            transform.position + arCamera.transform.rotation * Vector3.forward,
-            Vector3.up);
+        Vector3 facing = PointerInput.IsXR
+            ? transform.position - arCamera.transform.position
+            : arCamera.transform.rotation * Vector3.forward;
+        transform.LookAt(transform.position + facing, Vector3.up);
     }
 
     // ── Init ──────────────────────────────────────
@@ -340,11 +340,12 @@ public abstract class MapNode : MonoBehaviour
     // ── Touch ─────────────────────────────────────
     void HandleTouch()
     {
-        foreach (Touch t in Input.touches)
+        foreach (var p in PointerInput.Samples)
         {
-            if (t.phase == TouchPhase.Began && !isTracking)
+            if (p.phase == TouchPhase.Began && !isTracking)
             {
-                var hit = RaycastMe(t.position);
+                if (p.overUI) continue;
+                var hit = RaycastMe(p.ray);
                 if (hit == null) continue;
 
                 // Cek tombol — arrow bisa DI-DRAG ke node target (seperti versi web)
@@ -354,42 +355,42 @@ public abstract class MapNode : MonoBehaviour
                     btnDragMode = IsBtn(hit.Value.transform, connectFwdBtn)
                         ? ConnectMode.Forward : ConnectMode.Backward;
                     connDragActive = false;
-                    isTracking = true; trackedFingerId = t.fingerId;
-                    touchBeganScreenPos = t.position; hasDragged = false;
+                    isTracking = true; trackedPointerId = p.id;
+                    beganSample = p; hasDragged = false;
                     continue;
                 }
                 if (IsBtn(hit.Value.transform, deleteConnBtn))
                 { OnDeleteBtn(); return; }
 
-                isTracking = true; trackedFingerId = t.fingerId;
-                touchBeganScreenPos = t.position; hasDragged = false;
-                ComputeDragOffset(t.position);
+                isTracking = true; trackedPointerId = p.id;
+                beganSample = p; hasDragged = false;
+                ComputeDragOffset(p.ray);
             }
-            else if (t.fingerId == trackedFingerId)
+            else if (isTracking && p.id == trackedPointerId)
             {
-                if (t.phase == TouchPhase.Moved)
+                if (p.phase == TouchPhase.Moved)
                 {
-                    if (Vector2.Distance(t.position, touchBeganScreenPos) > DRAG_THRESHOLD || hasDragged)
+                    if (hasDragged || PointerInput.BeyondDragThreshold(beganSample, p))
                     {
                         hasDragged = true;
                         if (btnDragMode != ConnectMode.None)
                         {
                             // Drag garis koneksi dari arrow
                             if (!connDragActive)
-                            { manager.BeginConnectionDrag(this, t.position); connDragActive = true; }
-                            manager.UpdateConnectionDrag(t.position);
+                            { manager.BeginConnectionDrag(this, p); connDragActive = true; }
+                            manager.UpdateConnectionDrag(p);
                         }
-                        else MoveNode(t.position);
+                        else MoveNode(p.ray);
                     }
                 }
-                else if (t.phase == TouchPhase.Ended || t.phase == TouchPhase.Canceled)
+                else if (p.phase == TouchPhase.Ended || p.phase == TouchPhase.Canceled)
                 {
                     if (btnDragMode != ConnectMode.None)
                     {
                         if (connDragActive)
                         {
                             // Lepas di node target → sambungkan
-                            manager.EndConnectionDrag(t.position, this,
+                            manager.EndConnectionDrag(p, this,
                                 btnDragMode == ConnectMode.Backward);
                             DeselectAll();
                         }
@@ -402,74 +403,14 @@ public abstract class MapNode : MonoBehaviour
                         btnDragMode = ConnectMode.None; connDragActive = false;
                     }
                     else if (!hasDragged) OnNodeTapped();
-                    isTracking = false; trackedFingerId = -1;
+                    isTracking = false; trackedPointerId = -1;
                 }
             }
         }
-
-#if UNITY_EDITOR
-        if (Input.GetMouseButtonDown(0) && !isTracking)
-        {
-            var hit = RaycastMe(Input.mousePosition);
-            if (hit == null) return;
-            if (IsBtn(hit.Value.transform, connectFwdBtn) ||
-                IsBtn(hit.Value.transform, connectBwdBtn))
-            {
-                btnDragMode = IsBtn(hit.Value.transform, connectFwdBtn)
-                    ? ConnectMode.Forward : ConnectMode.Backward;
-                connDragActive = false;
-                isTracking = true; trackedFingerId = -99;
-                touchBeganScreenPos = Input.mousePosition; hasDragged = false;
-                return;
-            }
-            if (IsBtn(hit.Value.transform, deleteConnBtn)) { OnDeleteBtn(); return; }
-            isTracking = true; trackedFingerId = -99;
-            touchBeganScreenPos = Input.mousePosition; hasDragged = false;
-            ComputeDragOffset(Input.mousePosition);
-        }
-        else if (trackedFingerId == -99)
-        {
-            if (Input.GetMouseButton(0))
-            {
-                if (Vector2.Distance(Input.mousePosition, touchBeganScreenPos) > DRAG_THRESHOLD || hasDragged)
-                {
-                    hasDragged = true;
-                    if (btnDragMode != ConnectMode.None)
-                    {
-                        if (!connDragActive)
-                        { manager.BeginConnectionDrag(this, Input.mousePosition); connDragActive = true; }
-                        manager.UpdateConnectionDrag(Input.mousePosition);
-                    }
-                    else MoveNode(Input.mousePosition);
-                }
-            }
-            else if (Input.GetMouseButtonUp(0))
-            {
-                if (btnDragMode != ConnectMode.None)
-                {
-                    if (connDragActive)
-                    {
-                        manager.EndConnectionDrag(Input.mousePosition, this,
-                            btnDragMode == ConnectMode.Backward);
-                        DeselectAll();
-                    }
-                    else
-                    {
-                        if (btnDragMode == ConnectMode.Forward) OnFwdBtn();
-                        else OnBwdBtn();
-                    }
-                    btnDragMode = ConnectMode.None; connDragActive = false;
-                }
-                else if (!hasDragged) OnNodeTapped();
-                isTracking = false; trackedFingerId = -1;
-            }
-        }
-#endif
     }
 
-    RaycastHit? RaycastMe(Vector3 screenPos)
+    RaycastHit? RaycastMe(Ray ray)
     {
-        Ray ray = arCamera.ScreenPointToRay(screenPos);
         if (!Physics.Raycast(ray, out RaycastHit hit)) return null;
         return (hit.transform == transform || hit.transform.IsChildOf(transform)) ? hit : (RaycastHit?)null;
     }
@@ -477,17 +418,15 @@ public abstract class MapNode : MonoBehaviour
     bool IsBtn(Transform t, GameObject btn) =>
         btn != null && btn.activeSelf && (t == btn.transform || t.IsChildOf(btn.transform));
 
-    void ComputeDragOffset(Vector3 screenPos)
+    void ComputeDragOffset(Ray r)
     {
         Plane p = new Plane(arCamera.transform.forward, transform.position);
-        Ray r = arCamera.ScreenPointToRay(screenPos);
         if (p.Raycast(r, out float d)) dragOffset = transform.position - r.GetPoint(d);
     }
 
-    void MoveNode(Vector3 screenPos)
+    void MoveNode(Ray r)
     {
         Plane p = new Plane(arCamera.transform.forward, transform.position);
-        Ray r = arCamera.ScreenPointToRay(screenPos);
         if (p.Raycast(r, out float d)) transform.position = r.GetPoint(d) + dragOffset;
     }
 

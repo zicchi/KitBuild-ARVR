@@ -47,6 +47,11 @@ public class OffscreenIndicator : MonoBehaviour
 
     void LateUpdate()
     {
+        if (PointerInput.IsXR)
+        {
+            if (poolParent != null && poolParent.gameObject.activeSelf) poolParent.gameObject.SetActive(false);
+            return;
+        }
         if (cam == null) { cam = Camera.main; if (cam == null) return; }
 
         int   used = 0;
